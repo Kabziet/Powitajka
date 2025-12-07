@@ -10,11 +10,12 @@ import {
 } from '@discordjs/voice';
 import play from 'play-dl';
 import fetch from 'node-fetch';
+import { Readable } from 'stream';
 
 const token = process.env.DISCORD_TOKEN;
 
 if (!token) {
-  console.error('Brak zmiennej środowiskowej DISCORD_TOKEN. Ustaw ją w pliku .env.');
+  console.error('Brak zmiennej środowiskowej DISCORD_TOKEN. Ustaw ją w pliku .env lub w zmiennych środowiskowych Railway.');
   process.exit(1);
 }
 
@@ -54,7 +55,7 @@ function getOrCreatePlayer(interaction) {
     connection.subscribe(player);
 
     player.on(AudioPlayerStatus.Idle, () => {
-      // Po zakończeniu utworu nic nie robimy – bot zostaje na kanale.
+      // Po zakończeniu utworu nic nie robimy – bot może zostać na kanale.
     });
 
     player.on('error', error => {
@@ -69,9 +70,9 @@ function getOrCreatePlayer(interaction) {
 }
 
 async function playFromUrl(interaction, url) {
-  await interaction.deferReply();
-
   try {
+    await interaction.deferReply();
+
     const { connection, player } = getOrCreatePlayer(interaction);
 
     if (!play.is_valid_url(url)) {
@@ -92,14 +93,23 @@ async function playFromUrl(interaction, url) {
     await interaction.editReply(`▶️ Odtwarzam: **${title}**`);
   } catch (error) {
     console.error('Błąd przy odtwarzaniu z URL:', error);
-    await interaction.editReply('Wystąpił błąd podczas próby odtworzenia tego linku.');
+    try {
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply('Wystąpił błąd podczas próby odtworzenia tego linku.');
+      } else {
+        await interaction.editReply('Wystąpił błąd podczas próby odtworzenia tego linku.');
+      }
+    } catch (e) {
+      console.error('Błąd przy wysyłaniu odpowiedzi na interakcję (URL):', e);
+    }
   }
 }
 
 async function playFromAttachment(interaction, attachment) {
-  await interaction.deferReply();
-
   try {
+    // defer na start – żeby Discord nie wyświetlał "aplikacja nie reaguje"
+    await interaction.deferReply();
+
     const { player } = getOrCreatePlayer(interaction);
 
     // Prosta walidacja formatu
@@ -115,20 +125,32 @@ async function playFromAttachment(interaction, attachment) {
     }
 
     const response = await fetch(attachment.url);
+
     if (!response.ok || !response.body) {
+      console.error('Nieudany response przy pobieraniu pliku:', response.status, response.statusText);
       await interaction.editReply('Nie udało się pobrać pliku z serwerów Discord.');
       return;
     }
 
-    const stream = response.body;
-    const resource = createAudioResource(stream);
+    // response.body (Web Stream) → Node.js Readable
+    const nodeStream = Readable.fromWeb(response.body);
+
+    const resource = createAudioResource(nodeStream);
 
     player.play(resource);
 
     await interaction.editReply(`▶️ Odtwarzam plik: **${attachment.name}**`);
   } catch (error) {
     console.error('Błąd przy odtwarzaniu pliku:', error);
-    await interaction.editReply('Wystąpił błąd podczas próby odtworzenia wgranego pliku.');
+    try {
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply('Wystąpił błąd podczas próby odtworzenia wgranego pliku.');
+      } else {
+        await interaction.editReply('Wystąpił błąd podczas próby odtworzenia wgranego pliku.');
+      }
+    } catch (e) {
+      console.error('Błąd przy wysyłaniu odpowiedzi na interakcję (plik):', e);
+    }
   }
 }
 
@@ -161,38 +183,52 @@ client.once(Events.ClientReady, (c) => {
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  if (interaction.commandName === 'graj') {
-    const url = interaction.options.getString('url', true);
+  try {
+    if (interaction.commandName === 'graj') {
+      const url = interaction.options.getString('url', true);
 
-    const voiceChannel = interaction.member?.voice?.channel;
-    if (!voiceChannel) {
-      await interaction.reply({
-        content: 'Musisz być na kanale głosowym, żeby użyć tej komendy.',
-        ephemeral: true
-      });
-      return;
+      const voiceChannel = interaction.member?.voice?.channel;
+      if (!voiceChannel) {
+        await interaction.reply({
+          content: 'Musisz być na kanale głosowym, żeby użyć tej komendy.',
+          ephemeral: true
+        });
+        return;
+      }
+
+      await playFromUrl(interaction, url);
     }
 
-    await playFromUrl(interaction, url);
-  }
+    if (interaction.commandName === 'graj-plik') {
+      const attachment = interaction.options.getAttachment('plik', true);
 
-  if (interaction.commandName === 'graj-plik') {
-    const attachment = interaction.options.getAttachment('plik', true);
+      const voiceChannel = interaction.member?.voice?.channel;
+      if (!voiceChannel) {
+        await interaction.reply({
+          content: 'Musisz być na kanale głosowym, żeby użyć tej komendy.',
+          ephemeral: true
+        });
+        return;
+      }
 
-    const voiceChannel = interaction.member?.voice?.channel;
-    if (!voiceChannel) {
-      await interaction.reply({
-        content: 'Musisz być na kanale głosowym, żeby użyć tej komendy.',
-        ephemeral: true
-      });
-      return;
+      await playFromAttachment(interaction, attachment);
     }
 
-    await playFromAttachment(interaction, attachment);
-  }
-
-  if (interaction.commandName === 'stop') {
-    await stopPlayback(interaction);
+    if (interaction.commandName === 'stop') {
+      await stopPlayback(interaction);
+    }
+  } catch (error) {
+    console.error('Błąd w handlerze InteractionCreate:', error);
+    if (!interaction.replied && !interaction.deferred) {
+      try {
+        await interaction.reply({
+          content: 'Wystąpił nieoczekiwany błąd przy obsłudze komendy.',
+          ephemeral: true
+        });
+      } catch (e) {
+        console.error('Błąd przy wysyłaniu awaryjnej odpowiedzi:', e);
+      }
+    }
   }
 });
 
