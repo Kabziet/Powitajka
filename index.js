@@ -5,12 +5,15 @@ import {
   createAudioPlayer,
   createAudioResource,
   NoSubscriberBehavior,
-  AudioPlayerStatus
+  AudioPlayerStatus,
+  StreamType
 } from '@discordjs/voice';
 import play from 'play-dl';
 import ffmpeg from 'ffmpeg-static';
+import prism from 'prism-media';
+import { Readable } from 'stream';
 
-// Ustawiamy ścieżkę do ffmpeg dla @discordjs/voice / prism-media
+// Ustawiamy ścieżkę do ffmpeg dla prism-media / @discordjs/voice
 if (ffmpeg) {
   process.env.FFMPEG_PATH = ffmpeg;
 }
@@ -78,15 +81,11 @@ async function playFromUrl(interaction, url) {
 
     const { player } = getOrCreatePlayer(interaction);
 
-    if (!play.is_valid_url(url)) {
-      await interaction.editReply('Ten link wygląda na nieprawidłowy. Upewnij się, że podałeś pełny adres (np. https://youtube.com/...).');
-      return;
-    }
-
+    // Walidacja linku przez play-dl
     const validation = await play.validate(url).catch(() => null);
 
     if (!validation || validation === 'search') {
-      await interaction.editReply('Ten typ linku nie jest obsługiwany albo wygląda jak wyszukiwarka, a nie bezpośredni link do utworu.');
+      await interaction.editReply('Ten link nie wygląda na bezpośredni, obsługiwany utwór (YouTube / SoundCloud itd.). Podaj pełny link do utworu.');
       return;
     }
 
@@ -95,12 +94,12 @@ async function playFromUrl(interaction, url) {
       const info = await play.video_basic_info(url);
       title = info?.video_details?.title || title;
     } catch {
-      // brak tytułu to nie krytyczny błąd
+      // brak tytułu nie blokuje odtwarzania
     }
 
-    // Strumień z play-dl
+    // Strumień z play-dl w trybie zgodnym z @discordjs/voice
     const stream = await play.stream(url, {
-      // bez specjalnych trybów, standardowy stream dla @discordjs/voice
+      discordPlayerCompatibility: true
     });
 
     const resource = createAudioResource(stream.stream, {
@@ -142,9 +141,43 @@ async function playFromAttachment(interaction, attachment) {
       return;
     }
 
-    // Używamy URL pliku jako wejścia dla FFmpeg (ffmpeg-static)
-    // FFmpeg pobiera plik z HTTPS i konwertuje do Opus pod spodem.
-    const resource = createAudioResource(attachment.url);
+    // Pobieramy plik z Discorda przez fetch (Node 20 ma wbudowany fetch)
+    const response = await fetch(attachment.url);
+
+    if (!response.ok || !response.body) {
+      console.error('Nieudany response przy pobieraniu pliku:', response.status, response.statusText);
+      await interaction.editReply('Nie udało się pobrać pliku z serwerów Discord.');
+      return;
+    }
+
+    // Web Stream -> Node Readable
+    const inputStream = Readable.fromWeb(response.body);
+
+    // FFmpeg: dekodujemy audio do PCM 48kHz, stereo
+    const ffmpegStream = new prism.FFmpeg({
+      args: [
+        '-analyzeduration', '0',
+        '-loglevel', '0',
+        '-i', 'pipe:0',
+        '-f', 's16le',
+        '-ar', '48000',
+        '-ac', '2'
+      ]
+    });
+
+    // Opus encoder
+    const opusStream = new prism.opus.Encoder({
+      rate: 48000,
+      channels: 2,
+      frameSize: 960
+    });
+
+    // input -> ffmpeg -> opus
+    const transcodedStream = inputStream.pipe(ffmpegStream).pipe(opusStream);
+
+    const resource = createAudioResource(transcodedStream, {
+      inputType: StreamType.Opus
+    });
 
     player.play(resource);
 
