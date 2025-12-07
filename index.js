@@ -5,12 +5,15 @@ import {
   createAudioPlayer,
   createAudioResource,
   NoSubscriberBehavior,
-  AudioPlayerStatus,
-  getVoiceConnection
+  AudioPlayerStatus
 } from '@discordjs/voice';
 import play from 'play-dl';
-import fetch from 'node-fetch';
-import { Readable } from 'stream';
+import ffmpeg from 'ffmpeg-static';
+
+// Ustawiamy ścieżkę do ffmpeg dla @discordjs/voice / prism-media
+if (ffmpeg) {
+  process.env.FFMPEG_PATH = ffmpeg;
+}
 
 const token = process.env.DISCORD_TOKEN;
 
@@ -73,31 +76,48 @@ async function playFromUrl(interaction, url) {
   try {
     await interaction.deferReply();
 
-    const { connection, player } = getOrCreatePlayer(interaction);
+    const { player } = getOrCreatePlayer(interaction);
 
     if (!play.is_valid_url(url)) {
-      await interaction.editReply('Ten link wygląda na nieprawidłowy. Upewnij się, że podałeś poprawny URL.');
+      await interaction.editReply('Ten link wygląda na nieprawidłowy. Upewnij się, że podałeś pełny adres (np. https://youtube.com/...).');
       return;
     }
 
-    const info = await play.video_basic_info(url).catch(() => null);
+    const validation = await play.validate(url).catch(() => null);
 
-    const stream = await play.stream(url);
+    if (!validation || validation === 'search') {
+      await interaction.editReply('Ten typ linku nie jest obsługiwany albo wygląda jak wyszukiwarka, a nie bezpośredni link do utworu.');
+      return;
+    }
+
+    let title = 'Nieznany tytuł';
+    try {
+      const info = await play.video_basic_info(url);
+      title = info?.video_details?.title || title;
+    } catch {
+      // brak tytułu to nie krytyczny błąd
+    }
+
+    // Strumień z play-dl
+    const stream = await play.stream(url, {
+      // bez specjalnych trybów, standardowy stream dla @discordjs/voice
+    });
+
     const resource = createAudioResource(stream.stream, {
       inputType: stream.type
     });
 
     player.play(resource);
 
-    const title = info?.video_details?.title || 'Nieznany tytuł';
     await interaction.editReply(`▶️ Odtwarzam: **${title}**`);
   } catch (error) {
     console.error('Błąd przy odtwarzaniu z URL:', error);
+    const msg = `Wystąpił błąd podczas próby odtworzenia tego linku.\nSzczegóły: \`${error.message || error}\``;
     try {
       if (!interaction.replied && !interaction.deferred) {
-        await interaction.reply('Wystąpił błąd podczas próby odtworzenia tego linku.');
+        await interaction.reply(msg);
       } else {
-        await interaction.editReply('Wystąpił błąd podczas próby odtworzenia tego linku.');
+        await interaction.editReply(msg);
       }
     } catch (e) {
       console.error('Błąd przy wysyłaniu odpowiedzi na interakcję (URL):', e);
@@ -107,12 +127,10 @@ async function playFromUrl(interaction, url) {
 
 async function playFromAttachment(interaction, attachment) {
   try {
-    // defer na start – żeby Discord nie wyświetlał "aplikacja nie reaguje"
     await interaction.deferReply();
 
     const { player } = getOrCreatePlayer(interaction);
 
-    // Prosta walidacja formatu
     const allowedExtensions = ['.mp3', '.ogg', '.webm', '.wav', '.flac', '.m4a'];
     const name = attachment.name?.toLowerCase() || '';
     const hasAllowedExtension = allowedExtensions.some(ext => name.endsWith(ext));
@@ -124,29 +142,21 @@ async function playFromAttachment(interaction, attachment) {
       return;
     }
 
-    const response = await fetch(attachment.url);
-
-    if (!response.ok || !response.body) {
-      console.error('Nieudany response przy pobieraniu pliku:', response.status, response.statusText);
-      await interaction.editReply('Nie udało się pobrać pliku z serwerów Discord.');
-      return;
-    }
-
-    // response.body (Web Stream) → Node.js Readable
-    const nodeStream = Readable.fromWeb(response.body);
-
-    const resource = createAudioResource(nodeStream);
+    // Używamy URL pliku jako wejścia dla FFmpeg (ffmpeg-static)
+    // FFmpeg pobiera plik z HTTPS i konwertuje do Opus pod spodem.
+    const resource = createAudioResource(attachment.url);
 
     player.play(resource);
 
     await interaction.editReply(`▶️ Odtwarzam plik: **${attachment.name}**`);
   } catch (error) {
     console.error('Błąd przy odtwarzaniu pliku:', error);
+    const msg = `Wystąpił błąd podczas próby odtworzenia wgranego pliku.\nSzczegóły: \`${error.message || error}\``;
     try {
       if (!interaction.replied && !interaction.deferred) {
-        await interaction.reply('Wystąpił błąd podczas próby odtworzenia wgranego pliku.');
+        await interaction.reply(msg);
       } else {
-        await interaction.editReply('Wystąpił błąd podczas próby odtworzenia wgranego pliku.');
+        await interaction.editReply(msg);
       }
     } catch (e) {
       console.error('Błąd przy wysyłaniu odpowiedzi na interakcję (plik):', e);
