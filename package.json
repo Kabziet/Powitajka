@@ -1,0 +1,18 @@
+{
+  "name": "discord-music-bot",
+  "version": "1.0.0",
+  "description": "Prosty bot muzyczny na Discorda do odtwarzania muzyki z linków i plików.",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "deploy-commands": "node deploy-commands.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "@discordjs/voice": "^0.16.0",
+    "play-dl": "^1.9.7",
+    "dotenv": "^16.4.5",
+    "node-fetch": "^3.3.2"
+  }
+}
